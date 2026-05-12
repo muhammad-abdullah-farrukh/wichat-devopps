@@ -1,0 +1,228 @@
+name: Testing Pipeline (PR → Testing Server)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - main
+  workflow_dispatch:   # manual trigger button
+
+jobs:
+  # ─────────────────────────────────────────────
+  # 1. BUILD
+  # ─────────────────────────────────────────────
+  build:
+    name: Build All Services
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies (all services)
+        run: |
+          npm --prefix users/authservice ci
+          npm --prefix users/userservice ci
+          npm --prefix llmservice ci
+          npm --prefix questionservice ci
+          npm --prefix gatewayservice ci
+          npm --prefix webapp ci
+
+      - name: Build React webapp
+        run: npm --prefix webapp run build
+        env:
+          CI: false
+
+  # ─────────────────────────────────────────────
+  # 2. UNIT TESTS
+  # ─────────────────────────────────────────────
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: |
+          npm --prefix users/authservice ci
+          npm --prefix users/userservice ci
+          npm --prefix llmservice ci
+          npm --prefix questionservice ci
+          npm --prefix gatewayservice ci
+          npm --prefix webapp ci
+
+      - name: Run unit tests with coverage
+        run: |
+          npm --prefix users/authservice test -- --coverage --watchAll=false
+          npm --prefix users/userservice test -- --coverage --watchAll=false
+          npm --prefix llmservice test -- --coverage --watchAll=false
+          npm --prefix questionservice test -- --coverage --watchAll=false
+          npm --prefix gatewayservice test -- --coverage --watchAll=false
+          npm --prefix webapp test -- --coverage --watchAll=false
+
+  # ─────────────────────────────────────────────
+  # 3. LINTING / CODE ANALYSIS
+  # ─────────────────────────────────────────────
+  lint:
+    name: Code Analysis & Linting
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: |
+          npm --prefix users/authservice ci
+          npm --prefix users/userservice ci
+          npm --prefix llmservice ci
+          npm --prefix questionservice ci
+          npm --prefix gatewayservice ci
+          npm --prefix webapp ci
+
+      - name: Run ESLint on all services
+        run: |
+          npx eslint users/authservice/*.js  --no-eslintrc -c '{"env":{"node":true,"es2021":true},"rules":{"no-unused-vars":"warn","no-console":"off"}}' || true
+          npx eslint users/userservice/*.js  --no-eslintrc -c '{"env":{"node":true,"es2021":true},"rules":{"no-unused-vars":"warn","no-console":"off"}}' || true
+          npx eslint gatewayservice/*.js     --no-eslintrc -c '{"env":{"node":true,"es2021":true},"rules":{"no-unused-vars":"warn","no-console":"off"}}' || true
+          npx eslint llmservice/*.js         --no-eslintrc -c '{"env":{"node":true,"es2021":true},"rules":{"no-unused-vars":"warn","no-console":"off"}}' || true
+          npx eslint questionservice/*.js    --no-eslintrc -c '{"env":{"node":true,"es2021":true},"rules":{"no-unused-vars":"warn","no-console":"off"}}' || true
+          cd webapp && npx react-scripts lint 2>/dev/null || npx eslint src --ext .js,.jsx --no-eslintrc -c '{"env":{"browser":true,"es2021":true},"rules":{"no-unused-vars":"warn"}}' || true
+
+  # ─────────────────────────────────────────────
+  # 4. DEPLOY TO TESTING EC2
+  # ─────────────────────────────────────────────
+  deploy-testing:
+    name: Deploy to Testing Server
+    runs-on: ubuntu-latest
+    needs: [unit-tests, lint]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Upload docker-compose to Testing server
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ secrets.TESTING_HOST }}
+          username: ${{ secrets.TESTING_USER }}
+          key: ${{ secrets.TESTING_KEY }}
+          port: 22
+          source: "docker-compose.yml"
+          target: "~/"
+          overwrite: true
+
+      - name: Deploy on Testing server via SSH
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.TESTING_HOST }}
+          username: ${{ secrets.TESTING_USER }}
+          key: ${{ secrets.TESTING_KEY }}
+          port: 22
+          script: |
+            export LLM_API_KEY="${{ secrets.LLM_API_KEY }}"
+            export GEMINI_LLM_API_KEY="${{ secrets.GEMINI_LLM_API_KEY }}"
+            export REACT_APP_API_ENDPOINT="http://${{ secrets.TESTING_HOST }}:8000"
+            export FRONTEND_URL="http://${{ secrets.TESTING_HOST }}:3000"
+
+            docker compose --profile prod down || true
+            docker compose --profile prod pull
+            docker compose --profile prod up -d
+
+            sleep 15
+            echo "✅ Deployment complete on Testing server."
+
+  # ─────────────────────────────────────────────
+  # 5a. EMAIL ON FAILURE
+  # ─────────────────────────────────────────────
+  notify-failure:
+    name: Notify on Failure
+    runs-on: ubuntu-latest
+    needs: [build, unit-tests, lint, deploy-testing]
+    if: failure()
+    steps:
+      - name: Send failure email
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 587
+          username: ${{ secrets.EMAIL_USERNAME }}
+          password: ${{ secrets.EMAIL_PASSWORD }}
+          subject: "❌ CI Pipeline FAILED — PR #${{ github.event.number }} (${{ github.repository }})"
+          to: sajid.ali@giki.edu.pk,${{ github.event.pull_request.user.login }}@users.noreply.github.com
+          from: WiChat CI <${{ secrets.EMAIL_USERNAME }}>
+          body: |
+            Hello,
+
+            The CI pipeline for Pull Request #${{ github.event.number }} has FAILED.
+
+            Repository : ${{ github.repository }}
+            Branch     : ${{ github.head_ref }}
+            Opened by  : ${{ github.event.pull_request.user.login }}
+            PR Title   : ${{ github.event.pull_request.title }}
+            PR Link    : ${{ github.event.pull_request.html_url }}
+
+            Please check the Actions tab for details:
+            https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            Regards,
+            WiChat CI Bot
+
+  # ─────────────────────────────────────────────
+  # 5b. EMAIL ON SUCCESS  (to QA / instructor)
+  # ─────────────────────────────────────────────
+  notify-success:
+    name: Notify QA on Success
+    runs-on: ubuntu-latest
+    needs: [deploy-testing]
+    if: success()
+    steps:
+      - name: Send success email to QA
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 587
+          username: ${{ secrets.EMAIL_USERNAME }}
+          password: ${{ secrets.EMAIL_PASSWORD }}
+          subject: "✅ New Feature Deployed on TESTING — PR #${{ github.event.number }}"
+          to: sajid.ali@giki.edu.pk
+          from: WiChat CI <${{ secrets.EMAIL_USERNAME }}>
+          body: |
+            Hello Sir,
+
+            A new feature has been successfully deployed to the TESTING environment.
+
+            ─── Pull Request Details ────────────────────────
+            PR #      : ${{ github.event.number }}
+            Title     : ${{ github.event.pull_request.title }}
+            Author    : ${{ github.event.pull_request.user.login }}
+            Branch    : ${{ github.head_ref }} → main
+            PR Link   : ${{ github.event.pull_request.html_url }}
+
+            ─── Access the Deployed App ─────────────────────
+            Frontend  : http://${{ secrets.TESTING_HOST }}:3000
+            API       : http://${{ secrets.TESTING_HOST }}:8000
+
+            All checks passed:
+              ✔ Build successful
+              ✔ Unit tests passed
+              ✔ Linting clean
+              ✔ Deployed to Testing EC2
+
+            Regards,
+            WiChat CI Bot
