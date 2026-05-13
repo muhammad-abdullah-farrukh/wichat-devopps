@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - main
-  workflow_dispatch:   # manual trigger button
+  workflow_dispatch:
 
 jobs:
   # ─────────────────────────────────────────────
@@ -105,50 +105,101 @@ jobs:
           cd webapp && npx eslint src --ext .js,.jsx --no-eslintrc -c '{"env":{"browser":true,"es2021":true},"rules":{"no-unused-vars":"warn"}}' || true
 
   # ─────────────────────────────────────────────
-  # 4. DEPLOY TO STAGING EC2
+  # 4. BUILD DOCKER IMAGES & PUSH TO AWS ECR
   # ─────────────────────────────────────────────
-  deploy-staging:
-    name: Deploy to Staging Server
+  docker-build-push:
+    name: Build & Push Docker Images to ECR
     runs-on: ubuntu-latest
     needs: [unit-tests, lint]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Upload docker-compose to Staging server
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push all service images
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build \
+            --build-arg REACT_APP_API_ENDPOINT=http://${{ secrets.STAGING_HOST }}:8000 \
+            -t $ECR_REGISTRY/wichat-webapp:$IMAGE_TAG \
+            -t $ECR_REGISTRY/wichat-webapp:latest \
+            ./webapp
+          docker push $ECR_REGISTRY/wichat-webapp:$IMAGE_TAG
+          docker push $ECR_REGISTRY/wichat-webapp:latest
+
+          docker build \
+            -t $ECR_REGISTRY/wichat-authservice:$IMAGE_TAG \
+            -t $ECR_REGISTRY/wichat-authservice:latest \
+            ./users/authservice
+          docker push $ECR_REGISTRY/wichat-authservice:$IMAGE_TAG
+          docker push $ECR_REGISTRY/wichat-authservice:latest
+
+          docker build \
+            -t $ECR_REGISTRY/wichat-userservice:$IMAGE_TAG \
+            -t $ECR_REGISTRY/wichat-userservice:latest \
+            ./users/userservice
+          docker push $ECR_REGISTRY/wichat-userservice:$IMAGE_TAG
+          docker push $ECR_REGISTRY/wichat-userservice:latest
+
+          docker build \
+            --build-arg FRONTEND_URL=http://${{ secrets.STAGING_HOST }}:3000 \
+            -t $ECR_REGISTRY/wichat-gatewayservice:$IMAGE_TAG \
+            -t $ECR_REGISTRY/wichat-gatewayservice:latest \
+            ./gatewayservice
+          docker push $ECR_REGISTRY/wichat-gatewayservice:$IMAGE_TAG
+          docker push $ECR_REGISTRY/wichat-gatewayservice:latest
+
+          docker build \
+            --build-arg LLM_API_KEY=${{ secrets.LLM_API_KEY }} \
+            --build-arg GEMINI_LLM_API_KEY=${{ secrets.GEMINI_LLM_API_KEY }} \
+            -t $ECR_REGISTRY/wichat-llmservice:$IMAGE_TAG \
+            -t $ECR_REGISTRY/wichat-llmservice:latest \
+            ./llmservice
+          docker push $ECR_REGISTRY/wichat-llmservice:$IMAGE_TAG
+          docker push $ECR_REGISTRY/wichat-llmservice:latest
+
+          docker build \
+            -t $ECR_REGISTRY/wichat-questionservice:$IMAGE_TAG \
+            -t $ECR_REGISTRY/wichat-questionservice:latest \
+            ./questionservice
+          docker push $ECR_REGISTRY/wichat-questionservice:$IMAGE_TAG
+          docker push $ECR_REGISTRY/wichat-questionservice:latest
+
+  # ─────────────────────────────────────────────
+  # 5. DEPLOY TO STAGING EC2
+  # ─────────────────────────────────────────────
+  deploy-staging:
+    name: Deploy to Staging Server
+    runs-on: ubuntu-latest
+    needs: [docker-build-push]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Upload docker-compose and monitoring configs
         uses: appleboy/scp-action@master
         with:
           host: ${{ secrets.STAGING_HOST }}
           username: ${{ secrets.STAGING_USER }}
           key: ${{ secrets.STAGING_KEY }}
           port: 22
-          source: "docker-compose.yml"
+          source: "docker-compose.yml,gatewayservice/monitoring"
           target: "~/"
           overwrite: true
 
-      - name: Upload Prometheus config
-        uses: appleboy/scp-action@master
-        with:
-          host: ${{ secrets.STAGING_HOST }}
-          username: ${{ secrets.STAGING_USER }}
-          key: ${{ secrets.STAGING_KEY }}
-          port: 22
-          source: "./gatewayservice/monitoring/prometheus/"
-          target: "~/"
-          overwrite: true
-
-      - name: Upload Grafana config
-        uses: appleboy/scp-action@master
-        with:
-          host: ${{ secrets.STAGING_HOST }}
-          username: ${{ secrets.STAGING_USER }}
-          key: ${{ secrets.STAGING_KEY }}
-          port: 22
-          source: "./gatewayservice/monitoring/grafana/"
-          target: "~/"
-          overwrite: true
-
-      - name: Deploy on Staging server via SSH
+      - name: Deploy via SSH
         uses: appleboy/ssh-action@master
         with:
           host: ${{ secrets.STAGING_HOST }}
@@ -156,6 +207,10 @@ jobs:
           key: ${{ secrets.STAGING_KEY }}
           port: 22
           script: |
+            aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | \
+              docker login --username AWS --password-stdin ${{ secrets.ECR_REGISTRY }}
+
+            export ECR_REGISTRY="${{ secrets.ECR_REGISTRY }}"
             export LLM_API_KEY="${{ secrets.LLM_API_KEY }}"
             export GEMINI_LLM_API_KEY="${{ secrets.GEMINI_LLM_API_KEY }}"
             export REACT_APP_API_ENDPOINT="http://${{ secrets.STAGING_HOST }}:8000"
@@ -166,15 +221,15 @@ jobs:
             docker compose --profile prod up -d
 
             sleep 15
-            echo "✅ Deployment complete on Staging server."
+            echo "Deployment to Staging EC2 complete."
 
   # ─────────────────────────────────────────────
-  # 5a. EMAIL ON FAILURE
+  # 6a. NOTIFY ON FAILURE
   # ─────────────────────────────────────────────
   notify-failure:
     name: Notify on Failure
     runs-on: ubuntu-latest
-    needs: [build, unit-tests, lint, deploy-staging]
+    needs: [build, unit-tests, lint, docker-build-push, deploy-staging]
     if: failure()
     steps:
       - name: Send failure email
@@ -184,8 +239,8 @@ jobs:
           server_port: 587
           username: ${{ secrets.EMAIL_USERNAME }}
           password: ${{ secrets.EMAIL_PASSWORD }}
-          subject: "❌ Staging Pipeline FAILED — commit ${{ github.sha }} (${{ github.repository }})"
-          to: sajid.ali@giki.edu.pk,${{ github.event.pusher.email }}
+          subject: "❌ Staging Pipeline FAILED — ${{ github.repository }}"
+          to: sajid.ali@giki.edu.pk,${{ secrets.DEV1_EMAIL }},${{ secrets.DEV2_EMAIL }}
           from: WiChat CI <${{ secrets.EMAIL_USERNAME }}>
           body: |
             Hello,
@@ -193,26 +248,26 @@ jobs:
             The Staging CI/CD pipeline has FAILED for a push to the main branch.
 
             Repository  : ${{ github.repository }}
-            Commit      : ${{ github.sha }}
+            Commit SHA  : ${{ github.sha }}
             Pushed by   : ${{ github.actor }}
-            Commit Msg  : ${{ github.event.head_commit.message }}
+            Message     : ${{ github.event.head_commit.message }}
 
-            Please check the Actions tab for details:
+            Check the Actions logs here:
             https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
             Regards,
             WiChat CI Bot
 
   # ─────────────────────────────────────────────
-  # 5b. EMAIL ON SUCCESS
+  # 6b. NOTIFY QA ON SUCCESS
   # ─────────────────────────────────────────────
   notify-success:
-    name: Notify QA on Staging Deployment
+    name: Notify QA on Staging Success
     runs-on: ubuntu-latest
     needs: [deploy-staging]
     if: success()
     steps:
-      - name: Send success email to QA / Team
+      - name: Send success email
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.gmail.com
@@ -225,26 +280,32 @@ jobs:
           body: |
             Hello Sir,
 
-            The latest changes have been successfully deployed to the STAGING environment.
+            The latest changes have been built, containerized via Docker,
+            pushed to AWS ECR, and deployed to the STAGING environment.
 
-            ─── Commit Details ─────────────────────────────
+            ─── Commit Details ──────────────────────────────
             Repository  : ${{ github.repository }}
             Commit SHA  : ${{ github.sha }}
             Pushed by   : ${{ github.actor }}
             Message     : ${{ github.event.head_commit.message }}
             Branch      : main
 
+            ─── Docker Images (AWS ECR) ─────────────────────
+            Registry    : ${{ secrets.ECR_REGISTRY }}
+            Image Tag   : ${{ github.sha }}
+
             ─── Access the Staging App ──────────────────────
             Frontend    : http://${{ secrets.STAGING_HOST }}:3000
-            API Gateway : http://${{ secrets.STAGING_HOST }}:8000
+            API         : http://${{ secrets.STAGING_HOST }}:8000
 
             All checks passed:
               ✔ Build successful
               ✔ Unit tests passed
               ✔ Linting clean
+              ✔ Docker images pushed to ECR
               ✔ Deployed to Staging EC2
 
-            This build is ready for final client review.
+            This build is ready for final review.
 
             Regards,
             WiChat CI Bot
