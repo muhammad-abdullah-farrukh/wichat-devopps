@@ -12,7 +12,7 @@ services:
 
   authservice:
     container_name: authservice-wichat_en3b
-    image: ghcr.io/arquisoft/wichat_en3b/authservice:latest
+    image: ${ECR_REGISTRY}/wichat-authservice:latest
     profiles: ["dev", "prod"]
     build: ./users/authservice
     depends_on:
@@ -26,7 +26,7 @@ services:
 
   userservice:
     container_name: userservice-wichat_en3b
-    image: ghcr.io/arquisoft/wichat_en3b/userservice:latest
+    image: ${ECR_REGISTRY}/wichat-userservice:latest
     profiles: ["dev", "prod"]
     build: ./users/userservice
     depends_on:
@@ -38,10 +38,9 @@ services:
     environment:
       MONGODB_URI: mongodb://mongodb:27017/userdb
 
-
   questionservice:
     container_name: questionservice-wichat_en3b
-    image: ghcr.io/arquisoft/wichat_en3b/questionservice:latest
+    image: ${ECR_REGISTRY}/wichat-questionservice:latest
     profiles: ["dev", "prod"]
     build: ./questionservice
     depends_on:
@@ -55,9 +54,9 @@ services:
 
   llmservice:
     container_name: llmservice-wichat_en3b
-    image: ghcr.io/arquisoft/wichat_en3b/llmservice:latest
+    image: ${ECR_REGISTRY}/wichat-llmservice:latest
     profiles: ["dev", "prod"]
-    build: 
+    build:
       context: ./llmservice
       args:
         LLM_API_KEY: ${LLM_API_KEY}
@@ -72,7 +71,7 @@ services:
 
   gatewayservice:
     container_name: gatewayservice-wichat_en3b
-    image: ghcr.io/arquisoft/wichat_en3b/gatewayservice:latest
+    image: ${ECR_REGISTRY}/wichat-gatewayservice:latest
     profiles: ["dev", "prod"]
     build: ./gatewayservice
     depends_on:
@@ -95,7 +94,7 @@ services:
 
   webapp:
     container_name: webapp-wichat_en3b
-    image: ghcr.io/arquisoft/wichat_en3b/webapp:latest
+    image: ${ECR_REGISTRY}/wichat-webapp:latest
     profiles: ["dev", "prod"]
     build:
       context: ./webapp
@@ -117,9 +116,9 @@ services:
       - prometheus_data:/prometheus
     ports:
       - "9090:9090"
-    depends_on: 
+    depends_on:
       - gatewayservice
-      
+
   grafana:
     image: grafana/grafana
     container_name: grafana-wichat_en3b
@@ -143,13 +142,13 @@ services:
       - GF_SERVER_SERVE_FROM_SUB_PATH=true
     expose:
       - "9091"
-    depends_on: 
+    depends_on:
       - prometheus
 
 volumes:
   mongodb_data:
-  prometheus_data: 
-  grafana_data: 
+  prometheus_data:
+  grafana_data:
 
 networks:
   mynetwork:
