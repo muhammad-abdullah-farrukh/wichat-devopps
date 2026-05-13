@@ -135,6 +135,7 @@ jobs:
           key: ${{ secrets.TESTING_KEY }}
           port: 22
           script: |
+            # Pull latest images and restart
             export LLM_API_KEY="${{ secrets.LLM_API_KEY }}"
             export GEMINI_LLM_API_KEY="${{ secrets.GEMINI_LLM_API_KEY }}"
             export REACT_APP_API_ENDPOINT="http://${{ secrets.TESTING_HOST }}:8000"
@@ -144,6 +145,7 @@ jobs:
             docker compose --profile prod pull
             docker compose --profile prod up -d
 
+            # Wait for services to start
             sleep 15
             echo "✅ Deployment complete on Testing server."
 
@@ -164,7 +166,7 @@ jobs:
           username: ${{ secrets.EMAIL_USERNAME }}
           password: ${{ secrets.EMAIL_PASSWORD }}
           subject: "❌ CI Pipeline FAILED — PR #${{ github.event.number }} (${{ github.repository }})"
-          to: sajid.ali@giki.edu.pk,${{ github.event.pull_request.user.login }}@users.noreply.github.com
+          to: muhammadsajidali@example.com,${{ github.event.pull_request.user.login }}@users.noreply.github.com
           from: WiChat CI <${{ secrets.EMAIL_USERNAME }}>
           body: |
             Hello,
@@ -200,7 +202,7 @@ jobs:
           username: ${{ secrets.EMAIL_USERNAME }}
           password: ${{ secrets.EMAIL_PASSWORD }}
           subject: "✅ New Feature Deployed on TESTING — PR #${{ github.event.number }}"
-          to: sajid.ali@giki.edu.pk
+          to: muhammadsajidali@example.com
           from: WiChat CI <${{ secrets.EMAIL_USERNAME }}>
           body: |
             Hello Sir,
@@ -214,7 +216,7 @@ jobs:
             Branch    : ${{ github.head_ref }} → main
             PR Link   : ${{ github.event.pull_request.html_url }}
 
-            ─── Access the Deployed App ─────────────────────
+            ─── Access the Deployed App ────────────────────
             Frontend  : http://${{ secrets.TESTING_HOST }}:3000
             API       : http://${{ secrets.TESTING_HOST }}:8000
 
